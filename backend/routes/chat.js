@@ -22,18 +22,28 @@ const storage = multer.diskStorage({
     },
 });
 
+// 🟢 CRITICAL FIX: Define allowed MIME types explicitly
+const allowedMimeTypes = [
+    'image/jpeg', 'image/jpg', 'image/png', 'image/gif', 
+    'application/pdf', 
+    'application/msword', // .doc
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document', // .docx
+    'application/vnd.ms-excel',
+    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', // .xlsx
+    'application/vnd.oasis.opendocument.text', // .odt
+    'text/plain' // .txt
+];
+
 const upload = multer({
     storage: storage,
     limits: { fileSize: 10 * 1024 * 1024 }, // 10MB limit
     fileFilter: (req, file, cb) => {
-        const allowedTypes = /jpeg|jpg|png|gif|pdf|docx|xlsx|txt/;
-        const extname = allowedTypes.test(path.extname(file.originalname).toLowerCase());
-        const mimetype = allowedTypes.test(file.mimetype);
-
-        if (mimetype && extname) {
-            return cb(null, true);
-        } else {
-            cb(new Error('Error: Only images and documents allowed!')); 
+        // 🟢 CORRECTED LOGIC: Check MIME type against the explicit list
+        if (allowedMimeTypes.includes(file.mimetype.toLowerCase())) {
+            return cb(null, true);
+        } else {
+            // Reject if MIME type is not allowed
+            cb(new Error('Error: Only images and documents allowed!'), false); 
         }
     },
 }).single('file'); 
@@ -53,7 +63,6 @@ router.post('/text', auth, async (req, res) => {
             timestamp: Date.now(),
         });
         const savedMessage = await newMessage.save();
-        // 🟢 CRITICAL: Populate sender details for frontend to read
         await savedMessage.populate('sender', 'name'); 
         res.status(201).json(savedMessage); 
     } catch (err) {
@@ -68,30 +77,38 @@ router.post('/text', auth, async (req, res) => {
 router.post('/upload', auth, (req, res) => {
     upload(req, res, async (err) => {
         if (err) {
-            // Respond with 400 and the error message for the frontend alert
-            return res.status(400).json({ msg: err.message || 'File upload failed: Check size/type.' });
+            // Check for Multer file size/limit error
+            const errorMessage = err.message.includes('size') ? 'Error: File size too large (max 10MB).' : err.message;
+            return res.status(400).json({ msg: errorMessage || 'File upload failed: Check type/size.' });
         }
         if (!req.file) {
             return res.status(400).json({ msg: 'No file selected' });
         }
 
         try {
-            // 🟢 CRITICAL FIX: Use the simple relative path for storage
-            const fileUrl = `/uploads/${req.file.filename}`;
+            const fileUrl = `/uploads/${req.file.filename}`;
+            
+            // 🟢 IMPROVED TYPE DETERMINATION: Handle PDF, Image, and Document separately
+            let messageType;
+            if (req.file.mimetype.startsWith('image/')) {
+                messageType = 'image';
+            } else if (req.file.mimetype === 'application/pdf') {
+                messageType = 'pdf';
+            } else {
+                messageType = 'document'; // Catch all other allowed file types
+            }
             
             const newMessage = new Chat({
                 sender: req.user.id,
                 chatId: req.body.chatId,
                 content: fileUrl, 
-                type: req.file.mimetype.startsWith('image/') ? 'image' : 'document',
+                type: messageType, // Use the determined type
                 timestamp: Date.now(),
             });
             const savedMessage = await newMessage.save();
             
-            // 🟢 CRITICAL: Populate sender details for frontend to read
             await savedMessage.populate('sender', 'name'); 
 
-            // Return the full saved message object (used by frontend to broadcast)
             res.json(savedMessage);
             
         } catch (dbError) {
@@ -132,7 +149,7 @@ router.put('/:messageId', auth, async (req, res) => {
         message.edited = true;
         await message.save();
         
-        // Broadcast the edit event to all clients in the room
+        // Ensure req.io is available for broadcasting (requires setup in server.js)
         if (req.io) {
             req.io.to(message.chatId).emit('message_edited', {
                 messageId: message._id,
@@ -165,7 +182,7 @@ router.delete('/:messageId', auth, async (req, res) => {
         if (deleteForEveryone) {
             await Chat.deleteOne({ _id: req.params.messageId });
             
-            // Broadcast the delete event to all clients in the room
+            // Ensure req.io is available for broadcasting
             if (req.io) {
                 req.io.to(message.chatId).emit('message_deleted', {
                     messageId: req.params.messageId,
